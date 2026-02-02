@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.0.1"
+VERSION="0.0.2"
 
 cmd_power_profile_list="power-list"
 cmd_power_profile_set="power-set"
 cmd_cpu_governor_list="cpufreq-list"
 cmd_cpu_governor_set="cpufreq-set"
+cmd_io_scheduler_list="io-list"
+cmd_io_scheduler_set="io-set"
 
 show_general_help() {
   cat <<'HELP'
@@ -16,12 +18,16 @@ Usage:
   ptweak power-set <performance|power-saver|balanced>
   ptweak cpufreq-list
   ptweak cpufreq-set <powersave|performance>
+  ptweak io-list <all|current>
+  ptweak io-set <all|current> <scheduler>
 
 Commands:
   power-list           Show current power profiles via powerprofilesctl list
   power-set            Set power profile via powerprofilesctl set <mode>
   cpufreq-list         Show CPU governors via cpupower frequency-info --governors
   cpufreq-set          Set CPU governor via cpupower frequency-set -g <mode>
+  io-list              Show block I/O schedulers for all or current devices
+  io-set               Set block I/O scheduler for all or current devices
 HELP
 }
 
@@ -38,6 +44,12 @@ show_command_help() {
       ;;
     "$cmd_cpu_governor_set")
       echo "Set CPU governor via: cpupower frequency-set -g <powersave|performance>"
+      ;;
+    "$cmd_io_scheduler_list")
+      echo "Show block I/O schedulers via: io-list <all|current>"
+      ;;
+    "$cmd_io_scheduler_set")
+      echo "Set block I/O scheduler via: io-set <all|current> <scheduler>"
       ;;
     *)
       echo "Unknown command: $1" >&2
@@ -60,6 +72,41 @@ require_root() {
     echo "Root privileges required. Please run with sudo." >&2
     exit 1
   fi
+}
+
+is_supported_scheduler() {
+  local scheduler="$1"
+  local scheduler_file="$2"
+  local contents
+  contents="$(cat "$scheduler_file")"
+  contents="${contents//[/}"
+  contents="${contents//]/}"
+  for item in $contents; do
+    if [[ "$item" == "$scheduler" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+list_io_all_paths() {
+  local path
+  for path in /sys/block/*/queue/scheduler; do
+    local dev="${path#/sys/block/}"
+    dev="${dev%%/*}"
+    if [[ "$dev" =~ ^sd[a-z]+$ || "$dev" =~ ^mmcblk[0-9]+$ || "$dev" =~ ^nvme[0-9].*$ ]]; then
+      echo "$path"
+    fi
+  done
+}
+
+list_io_current_paths() {
+  local name
+  while IFS= read -r name; do
+    if [[ -n "$name" ]]; then
+      echo "/sys/block/$name/queue/scheduler"
+    fi
+  done < <(lsblk -dno NAME)
 }
 
 if [[ $# -eq 0 ]]; then
@@ -126,6 +173,68 @@ case "$command" in
         exit 1
         ;;
     esac
+    ;;
+  "$cmd_io_scheduler_list")
+    require_arg_count 1 "$#"
+    require_root
+    scope="$1"
+    case "$scope" in
+      current)
+        mapfile -t targets < <(list_io_current_paths)
+        if [[ "${#targets[@]}" -eq 0 ]]; then
+          echo "No block devices found for io-list: current" >&2
+          exit 1
+        fi
+        cat "${targets[@]}"
+        ;;
+      all)
+        grep "" /sys/block/*/queue/scheduler | grep -E '/sys/block/(sd[a-z]+|mmcblk[0-9]+|nvme[0-9][^/]*)/queue/scheduler'
+        ;;
+      *)
+        echo "Invalid scope for io-list: $scope (use all|current)" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  "$cmd_io_scheduler_set")
+    require_arg_count 2 "$#"
+    require_root
+    scope="$1"
+    scheduler="$2"
+    case "$scope" in
+      current)
+        mapfile -t targets < <(list_io_current_paths)
+        ;;
+      all)
+        mapfile -t targets < <(list_io_all_paths)
+        ;;
+      *)
+        echo "Invalid scope for io-set: $scope (use all|current)" >&2
+        exit 1
+        ;;
+    esac
+
+    if [[ "${#targets[@]}" -eq 0 ]]; then
+      echo "No matching block devices found for io-set: $scope" >&2
+      exit 1
+    fi
+
+    for path in "${targets[@]}"; do
+      if [[ ! -e "$path" ]]; then
+        echo "Missing scheduler path: $path" >&2
+        exit 1
+      fi
+      if ! is_supported_scheduler "$scheduler" "$path"; then
+        dev="${path#/sys/block/}"
+        dev="${dev%%/*}"
+        echo "Scheduler not supported on $dev: $scheduler" >&2
+        exit 1
+      fi
+    done
+
+    for path in "${targets[@]}"; do
+      echo "$scheduler" > "$path"
+    done
     ;;
   *)
     echo "Unknown command: $command" >&2

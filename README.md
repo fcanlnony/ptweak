@@ -30,4 +30,9 @@ sudo ptweak power-set power-saver
 sudo ptweak cpufreq-list
 sudo ptweak cpufreq-set performance
 sudo ptweak cpufreq-set powersave
+
+sudo ptweak io-list current
+sudo ptweak io-list all
+sudo ptweak io-set current none
+sudo ptweak io-set all mq-deadline
 ```
